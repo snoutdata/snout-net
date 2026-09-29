@@ -1,0 +1,8 @@
+# snout_net: asynchronous HTTP requests from SQL. It also needs the library in
+# shared_preload_libraries, where its background worker starts.
+comment = 'Asynchronous HTTP requests from SQL'
+default_version = '0.1.0'
+module_pathname = '$libdir/snout_net'
+relocatable = false
+superuser = true
+trusted = false
