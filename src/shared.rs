@@ -80,15 +80,14 @@ unsafe extern "C-unwind" fn startup() {
 	}
 }
 
-/// Wakes the worker if it is not already awake.
+/// Wakes the worker. The flag and the latch are both set every time: setting a latch that is
+/// already set costs one read, and setting it only when the flag flips from 0 left a worker asleep
+/// for good whenever the flag was still 1 from before (a worker that started before the extension
+/// existed never cleared it).
 pub fn wake_worker() {
 	let s = get();
-	if s.should_wake
-		.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-		.is_ok()
-	{
-		set_latch(s);
-	}
+	s.should_wake.store(1, Ordering::Release);
+	set_latch(s);
 }
 
 fn set_latch(s: &Shared) {

@@ -128,12 +128,14 @@ impl Worker {
 			}
 
 			self.dispatch();
+			// A commit that queued a request since the last read. Taken on every pass, before the
+			// read's snapshot, and remembered in `more`, so a wake that arrives while there is no
+			// room (or while there is nothing installed yet) is kept rather than left in the flag.
+			if shared::take_wake() {
+				self.more = true;
+			}
 			let free = settings::max_concurrent().saturating_sub(self.in_flight.len());
-			if free > 0
-				&& self.pending.is_empty()
-				&& self.retry_at.is_none()
-				&& (self.more || shared::take_wake())
-			{
+			if free > 0 && self.pending.is_empty() && self.retry_at.is_none() && self.more {
 				self.more = self.fetch(free + READ_AHEAD);
 				self.dispatch();
 				if self.more && self.in_flight.len() < settings::max_concurrent() {
