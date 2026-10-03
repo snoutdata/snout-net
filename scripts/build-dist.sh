@@ -17,8 +17,8 @@ major="${2:?the Postgres major}"
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$major" in
-	17) ;;
-	*) echo "snout_net is built and tested for Postgres 17, not $major" >&2; exit 2 ;;
+	17 | 18) ;;
+	*) echo "snout_net is built and tested for Postgres 17 and 18, not $major" >&2; exit 2 ;;
 esac
 
 pg_config="/usr/lib/postgresql/${major}/bin/pg_config"

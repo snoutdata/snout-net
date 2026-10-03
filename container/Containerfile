@@ -29,6 +29,10 @@ RUN cargo install --locked cargo-pgrx --version "${PGRX_VERSION}" \
 # Downloads and compiles Postgres 17 into ~/.pgrx with --enable-cassert.
 RUN cargo pgrx init --pg17 download
 
+# And Postgres 18 (docs/cloud/PG18.md), in its own layer so 17's build above is reused. `init`
+# rewrites pgrx's config with exactly the versions it is given, so 17 is named again by its pg_config.
+RUN cargo pgrx init --pg17 "$(ls -d ~/.pgrx/17.*/pgrx-install/bin)/pg_config" --pg18 download
+
 RUN rustup component add clippy rustfmt
 
 WORKDIR /work
