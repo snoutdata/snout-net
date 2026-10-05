@@ -221,9 +221,10 @@ impl Worker {
 				.collect();
 			let plan = prepare(
 				&mut plans.fetch,
-				c"select q.id, q.method::text, q.url, q.timeout_milliseconds, \
-				  array(select key || ': ' || value from jsonb_each_text(q.headers)), q.body, q.ctid::text \
-				  from net.http_request_queue q where not (q.id = any($1)) order by q.id limit $2",
+				c"select q.id, q.method::pg_catalog.text, q.url, q.timeout_milliseconds, \
+				  array(select key operator(pg_catalog.||) ': '::pg_catalog.text operator(pg_catalog.||) value \
+				  from pg_catalog.jsonb_each_text(q.headers)), q.body, q.ctid::pg_catalog.text \
+				  from net.http_request_queue q where not (q.id operator(pg_catalog.=) any($1)) order by q.id limit $2",
 				&mut [pg_sys::INT8ARRAYOID, pg_sys::INT8OID],
 			);
 			let rows = read_queue(
@@ -349,8 +350,10 @@ impl Worker {
 			let ttl = settings::ttl();
 			let expire = prepare(
 				&mut plans.expire,
-				c"delete from only net._http_response where ctid = any(array( \
-				  select ctid from only net._http_response where created < now() - $1::interval order by created limit $2))",
+				c"delete from only net._http_response where ctid operator(pg_catalog.=) any(array( \
+				  select ctid from only net._http_response \
+				  where created operator(pg_catalog.<) (pg_catalog.now() operator(pg_catalog.-) $1::pg_catalog.interval) \
+				  order by created limit $2))",
 				&mut [pg_sys::TEXTOID, pg_sys::INT4OID],
 			);
 			for _ in 0..EXPIRE_ROUNDS {
@@ -364,7 +367,8 @@ impl Worker {
 			}
 			let next_plan = prepare(
 				&mut plans.next_expiry,
-				c"select extract(epoch from (min(created) + $1::interval - now()))::float8 from only net._http_response",
+				c"select extract(epoch from ((pg_catalog.min(created) operator(pg_catalog.+) $1::pg_catalog.interval) \
+				  operator(pg_catalog.-) pg_catalog.now()))::pg_catalog.float8 from only net._http_response",
 				&mut [pg_sys::TEXTOID],
 			);
 			execute(next_plan, &mut [ttl.as_str().into_datum()]);
@@ -391,7 +395,8 @@ fn forget(plans: &mut Plans, rows: &[(i64, String)]) {
 	let ctids: Vec<String> = rows.iter().map(|(_, ctid)| ctid.clone()).collect();
 	let plan = prepare(
 		&mut plans.forget,
-		c"delete from net.http_request_queue where ctid = any($1::tid[]) and id = any($2) returning id",
+		c"delete from net.http_request_queue \
+		  where ctid operator(pg_catalog.=) any($1::pg_catalog.tid[]) and id operator(pg_catalog.=) any($2) returning id",
 		&mut [pg_sys::TEXTARRAYOID, pg_sys::INT8ARRAYOID],
 	);
 	let n = execute(plan, &mut [ctids.into_datum(), ids.clone().into_datum()]);
@@ -400,7 +405,7 @@ fn forget(plans: &mut Plans, rows: &[(i64, String)]) {
 		let left: Vec<i64> = ids.into_iter().filter(|id| !gone.contains(id)).collect();
 		let plan = prepare(
 			&mut plans.forget_by_id,
-			c"delete from net.http_request_queue where id = any($1)",
+			c"delete from net.http_request_queue where id operator(pg_catalog.=) any($1)",
 			&mut [pg_sys::INT8ARRAYOID],
 		);
 		execute(plan, &mut [left.into_datum()]);
@@ -409,6 +414,10 @@ fn forget(plans: &mut Plans, rows: &[(i64, String)]) {
 
 /// Runs `body` in its own transaction. `None` when it raised an ERROR (logged as a warning, and the
 /// transaction rolled back); what `body` returned otherwise.
+///
+/// Its statements run as `statement_role`, not as the role the worker connected as, through the
+/// commit (a deferred trigger fires there), and the role is put back after it. An ERROR anywhere
+/// puts it back too: aborting a transaction restores the role it began with.
 fn transaction(body: impl FnOnce() -> Opened) -> Option<Opened> {
 	unsafe {
 		pg_sys::SetCurrentStatementStartTimestamp();
@@ -417,11 +426,25 @@ fn transaction(body: impl FnOnce() -> Opened) -> Option<Opened> {
 	}
 	let result = PgTryBuilder::new(AssertUnwindSafe(move || {
 		unsafe { pg_sys::SPI_connect() };
+		let mut connected = pg_sys::Oid::INVALID;
+		let mut context: c_int = 0;
+		unsafe { pg_sys::GetUserIdAndSecContext(&mut connected, &mut context) };
+		if let Some(role) = statement_role() {
+			// As a SECURITY DEFINER function does: SET ROLE and SET SESSION AUTHORIZATION are
+			// refused for as long as it lasts, so code a trigger runs cannot step back up.
+			unsafe {
+				pg_sys::SetUserIdAndSecContext(
+					role,
+					context | pg_sys::SECURITY_LOCAL_USERID_CHANGE as c_int,
+				)
+			};
+		}
 		let r = body();
 		unsafe {
 			pg_sys::SPI_finish();
 			pg_sys::PopActiveSnapshot();
 			pg_sys::CommitTransactionCommand();
+			pg_sys::SetUserIdAndSecContext(connected, context);
 		}
 		Some(r)
 	}))
@@ -433,6 +456,59 @@ fn transaction(body: impl FnOnce() -> Opened) -> Option<Opened> {
 	.execute();
 	unsafe { pg_sys::pgstat_report_stat(false) };
 	result
+}
+
+thread_local! {
+	static OWNER_PLAN: std::cell::Cell<Option<pg_sys::SPIPlanPtr>> = const { std::cell::Cell::new(None) };
+}
+
+/// The role the worker's statements run as, when it is not the one it connected as.
+///
+/// The worker connects as a superuser unless `snout_net.username` names another role, and it
+/// writes to two tables that roles other than their owner may hold TRIGGER on (on a pod, the
+/// project's owner and `service_role`). A trigger runs its function as the role the statement runs
+/// as, so a superuser's insert would run that role's code as a superuser. So a superuser worker
+/// writes as the database's owner instead, the role a request in this database already answers
+/// to: a trigger then runs with nothing its author could not reach already. A database a
+/// superuser owns has no such role, and there the worker stays as it connected.
+fn statement_role() -> Option<pg_sys::Oid> {
+	if !unsafe { pg_sys::superuser() } {
+		return None;
+	}
+	let mut slot = OWNER_PLAN.with(|p| p.get());
+	let plan = prepare(
+		&mut slot,
+		c"select d.datdba from pg_catalog.pg_database d where d.oid operator(pg_catalog.=) $1",
+		&mut [pg_sys::OIDOID],
+	);
+	OWNER_PLAN.with(|p| p.set(slot));
+	execute(plan, &mut [unsafe { pg_sys::MyDatabaseId }.into_datum()]);
+	let owner = first_oid()?;
+	writer(true, owner, unsafe { pg_sys::superuser_arg(owner) })
+}
+
+/// Who writes, from whether the connected role is a superuser and who owns the database: `None`
+/// keeps the connected role.
+fn writer(
+	connected_is_superuser: bool,
+	owner: pg_sys::Oid,
+	owner_is_superuser: bool,
+) -> Option<pg_sys::Oid> {
+	(connected_is_superuser && owner != pg_sys::Oid::INVALID && !owner_is_superuser)
+		.then_some(owner)
+}
+
+/// The first column of the first row the last statement returned, as an OID.
+fn first_oid() -> Option<pg_sys::Oid> {
+	unsafe {
+		let table = pg_sys::SPI_tuptable;
+		if table.is_null() || pg_sys::SPI_processed == 0 {
+			return None;
+		}
+		let mut is_null = false;
+		let d = pg_sys::SPI_getbinval(*(*table).vals, (*table).tupdesc, 1, &mut is_null);
+		pg_sys::Oid::from_datum(d, is_null)
+	}
 }
 
 /// The request tables, locked against a concurrent DROP for the rest of the transaction.
@@ -478,7 +554,7 @@ fn prepare_respond(slot: &mut Option<pg_sys::SPIPlanPtr>) -> pg_sys::SPIPlanPtr 
 	prepare(
 		slot,
 		c"insert into net._http_response (id, status_code, content, headers, content_type, timed_out, error_msg) \
-		  values ($1, $2, $3, $4::jsonb, $5, $6, $7)",
+		  values ($1, $2, $3, $4::pg_catalog.jsonb, $5, $6, $7)",
 		&mut [
 			pg_sys::INT8OID,
 			pg_sys::INT4OID,
@@ -652,4 +728,27 @@ fn check(
 		body,
 		timeout_ms,
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::writer;
+	use pgrx::pg_sys::Oid;
+
+	#[test]
+	fn a_superuser_worker_writes_as_the_database_owner() {
+		let owner = Oid::from(16_384u32);
+		assert_eq!(writer(true, owner, false), Some(owner));
+	}
+
+	#[test]
+	fn otherwise_it_writes_as_it_connected() {
+		let owner = Oid::from(16_384u32);
+		// Connected as a role that is not a superuser (snout_net.username).
+		assert_eq!(writer(false, owner, false), None);
+		// A database a superuser owns.
+		assert_eq!(writer(true, Oid::from(10u32), true), None);
+		// No owner found.
+		assert_eq!(writer(true, Oid::INVALID, false), None);
+	}
 }
