@@ -1,5 +1,5 @@
 //! What is checked about a queued request before it is sent, and how a response is written down.
-//! Pure: no `unsafe`, no Postgres, tested with plain `#[test]`s and fuzzed (fuzz/).
+//! Pure: no `unsafe`, no Postgres, tested with plain `#[test]`s and fuzzed.
 #![forbid(unsafe_code)]
 
 /// The HTTP methods the queue's `method` column allows.
