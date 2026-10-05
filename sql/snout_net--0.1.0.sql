@@ -235,7 +235,9 @@ end
 $$;
 
 -- Everyone may queue requests and read responses, as with any extension that does not say
--- otherwise; a platform that wants less revokes it after CREATE EXTENSION.
+-- otherwise; a platform that wants less revokes it after CREATE EXTENSION. Every table privilege
+-- but TRIGGER: the worker writes these tables, and a trigger runs its function as the role the
+-- worker writes as, which is a superuser wherever the database's owner is one.
 grant usage on schema net to public;
 grant all on all sequences in schema net to public;
-grant all on all tables in schema net to public;
+grant select, insert, update, delete, truncate, references, maintain on all tables in schema net to public;
