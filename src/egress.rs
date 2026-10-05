@@ -1,5 +1,5 @@
 //! Which addresses a request may connect to. Pure: no `unsafe`, no Postgres, tested with plain
-//! `#[test]`s and fuzzed (fuzz/). The client asks [`Policy::refuses`] for every address it is about
+//! `#[test]`s and fuzzed. The client asks [`Policy::refuses`] for every address it is about
 //! to open a socket to, which is after DNS, for an IP literal, and again on every redirect hop, so
 //! nothing reaches a network this refuses whatever the URL said.
 #![forbid(unsafe_code)]
