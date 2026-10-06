@@ -466,7 +466,7 @@ thread_local! {
 ///
 /// The worker connects as a superuser unless `snout_net.username` names another role, and it
 /// writes to two tables that roles other than their owner may hold TRIGGER on (on a pod, the
-/// project's owner and `snout_server`). A trigger runs its function as the role the statement runs
+/// project's owner and `service_role`). A trigger runs its function as the role the statement runs
 /// as, so a superuser's insert would run that role's code as a superuser. So a superuser worker
 /// writes as the database's owner instead, the role a request in this database already answers
 /// to: a trigger then runs with nothing its author could not reach already. A database a
