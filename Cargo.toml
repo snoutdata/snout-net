@@ -22,15 +22,16 @@ crate-type = ["cdylib", "lib"]
 default = ["pg17"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = []
 
 # Pinned exactly, as snout_utils' is.
 [dependencies]
-pgrx = "=0.19.2"
+pgrx = "=0.19.4"
 libc = "0.2"
 
 [dev-dependencies]
-pgrx-tests = "=0.19.2"
+pgrx-tests = "=0.19.4"
 
 [lints.rust]
 # `unsafe` is denied everywhere except the Postgres and libcurl boundaries. This crate IS

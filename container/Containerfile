@@ -7,7 +7,7 @@
 # need. Versions are pinned, and cargo-pgrx must match the pgrx in Cargo.toml exactly.
 FROM docker.io/library/rust:1.98.1-bookworm
 
-ARG PGRX_VERSION=0.19.2
+ARG PGRX_VERSION=0.19.4
 ARG CARGO_DENY_VERSION=0.20.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,6 +32,22 @@ RUN cargo pgrx init --pg17 download
 # And Postgres 18, in its own layer so 17's build above is reused. `init`
 # rewrites pgrx's config with exactly the versions it is given, so 17 is named again by its pg_config.
 RUN cargo pgrx init --pg17 "$(ls -d ~/.pgrx/17.*/pgrx-install/bin)/pg_config" --pg18 download
+
+# And Postgres 19, its own layer for the same reason.
+# Postgres 19 is built here rather than by `init --pg19 download`: pgrx 0.19.4 predates 19.0 and
+# downloads 19rc2. Configured the way pgrx configures its own downloads (debug, cassert).
+ARG PG19_VERSION=19.0
+RUN set -eu; \
+	cd /tmp; \
+	curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG19_VERSION}/postgresql-${PG19_VERSION}.tar.bz2" | tar xj; \
+	cd "postgresql-${PG19_VERSION}"; \
+	./configure --prefix="$HOME/.pgrx/${PG19_VERSION}/pgrx-install" --with-pgport=28819 --enable-debug --enable-cassert >/dev/null; \
+	make -s -j"$(nproc)" world-bin >/dev/null; \
+	make -s install-world-bin >/dev/null; \
+	cd /tmp; rm -rf "postgresql-${PG19_VERSION}"; \
+	cargo pgrx init --pg17 "$(ls -d ~/.pgrx/17.*/pgrx-install/bin)/pg_config" \
+		--pg18 "$(ls -d ~/.pgrx/18.*/pgrx-install/bin)/pg_config" \
+		--pg19 "$HOME/.pgrx/${PG19_VERSION}/pgrx-install/bin/pg_config"
 
 RUN rustup component add clippy rustfmt
 
